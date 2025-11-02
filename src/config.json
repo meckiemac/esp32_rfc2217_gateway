@@ -1,0 +1,11 @@
+R"JSON(
+{
+  "sessions": { "max": 2, "stack_words": 4096 },
+  "buffers": { "net": 512, "serial": 512 },
+  "serial": [],
+  "control": {
+    "tcp_port": 4020,
+    "backlog": 2
+  }
+}
+)JSON"
