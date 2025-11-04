@@ -18,14 +18,12 @@ sections are:
 {
   "serial": [
     {
-      "port_id": 0,
       "uart": 2,
       "tx_pin": 17,
       "rx_pin": 16,
       "tcp_port": 4000
     },
     {
-      "port_id": 1,
       "uart": 1,
       "tx_pin": 25,
       "rx_pin": 26,
@@ -40,24 +38,23 @@ sections are:
 
 If you want to provision every UART dynamically, the `serial` array can now be
 empty (or omitted entirely).  Boot with only the `control` block and add ports
-over the control session using `addport` as described below.
+over the control session using `setportconfig` as described below.
 
 Each entry in `serial` defines one UART:
 
-- `port_id` – opaque identifier used by the runtime, passed to the
-  session layer and control port.
 - `uart` – ESP-IDF UART peripheral (`0`, `1`, or `2`).
 - `tx_pin`, `rx_pin`, `rts_pin`, `cts_pin` – GPIO assignments.  RTS/CTS
-  default to `UART_PIN_NO_CHANGE` when omitted.  As an alternative syntax
-  you can use a single string such as `"pin_map": "uart2:tx17,rx16[,rts18]"`;
-  the control port will show whichever form was last applied.
+  default to `UART_PIN_NO_CHANGE` when omitted.
 - `baud`, `data_bits`, `parity`, `stop_bits`, `flow_control` – initial
   UART parameters (defaults chosen when omitted).
 - `tcp_port`, `tcp_backlog` – listener settings; every UART receives its
   own TCP port.
 
+Port identifiers are assigned automatically in load order and are only used
+internally by the runtime and control port.
+
 The optional `control` section enables a tiny text interface that lives
-on a dedicated TCP socket.  It currently provides `status`, `help`, and
+on a dedicated TCP socket.  It currently provides `showport`, `help`, and
 `quit`.
 
 ## Runtime Architecture
@@ -81,7 +78,8 @@ blocks:
 
 3. **Session layer (`lib/ser2net_mcu/src/session_ops.c`)**
    - Adapts the original RFC2217 implementation to the new runtime.
-   - Tracks active sessions per `port_id` (used by the control port).
+  - Tracks active sessions per port (using an internal `port_id`, still exposed
+    in debug logs and the control port output).
    - Handles Telnet negotiation (`BINARY` + `COM-PORT` options) and all
      RFC2217 commands that make sense on bare-metal (baud rate, data
      bits, parity, stop bits, flow control, purge, and simple
@@ -96,36 +94,57 @@ headless device:
 
 ```
 $ telnet <esp-ip> 4020
-ser2net> status
-Active ports:
-  port_id=0 sessions=0
-  port_id=1 sessions=0
+ser2net> showport
+Port 0 (TCP 4000):
+  UART=2 backlog=4 active_sessions=0 mode=telnet enabled=true
+  Pins: UART2 TX17 RX16 RTSNA CTSNA
+  Defaults: baud=115200 data_bits=8 parity=none stop_bits=1 flow=disabled
+Port 1 (TCP 4001):
+  UART=1 backlog=4 active_sessions=0 mode=telnet enabled=true
+  Pins: UART1 TX25 RX26 RTSNA CTSNA
+  Defaults: baud=115200 data_bits=8 parity=none stop_bits=1 flow=disabled
 ser2net> quit
 ```
 
 The task runs independently of the RFC2217 sessions, so it can be left
-enabled in production without impacting serial throughput.
+enabled in production without impacting serial throughput. Die
+Monitor-Funktion (`monitor tcp/term`) lässt sich separat über
+`ENABLE_MONITORING` kompilieren.
 
 ### Dynamic port provisioning
 
-With the `addport` command you can create listeners and UART bindings on the
-fly.  Example (creates the former `uart2` mapping from the JSON snippet above):
+The `setportconfig` command now also creates listeners and UART bindings when a
+TCP port is referenced that does not yet exist.  Supply the desired TCP port
+followed by the uppercase pin tokens:
 
 ```
-ser2net> addport port=0 tcp=4000 uart=2 tx=17 rx=16 mode=raw baud=115200
-Port added.
+ser2net> setportconfig 4000 UART2 TX17 RX16 RTSNA CTSNA 115200 8DATABITS NONE 1STOPBIT
+Port created.
 ser2net> showport 4000
 Port 0 (TCP 4000):
-  UART=2 backlog=4 active_sessions=0 mode=raw enabled=true
-  Pins: TX=17 RX=16 RTS=n/a CTS=n/a
-  Pin map: uart2:tx17,rx16
+  UART=2 backlog=4 active_sessions=0 mode=telnet enabled=true
+  Pins: UART2 TX17 RX16 RTSNA CTSNA
   Defaults: baud=115200 data_bits=8 parity=none stop_bits=1 flow=disabled
 ```
 
-Any field that `setportconfig` understands (baud/data bits/parity/flow) can be
-adjusted after the port exists.  For a fully dynamic setup boot with an empty
-`serial` array, connect to the control port, invoke `addport` for each UART,
-then run your RFC2217 clients as usual.
+Subsequent `setportconfig` calls update the port in place; you can still adjust
+baud rate, framing, flow control, or pins for existing listeners, and the
+changes propagate to active sessions when requested.  For a fully dynamic setup
+boot with an empty `serial` array, connect to the control port, invoke
+`setportconfig` once per UART, then run your RFC2217 clients as usual.
+
+Use `-TX` / `-RX` tokens when a direction should remain unconnected (e.g. pure
+monitoring or rawlp). The same shortcut works for modem signals (`-RTS`,
+`-CTS`).
+
+### Statische Builds
+
+Schaltet man `ENABLE_DYNAMIC_SESSIONS=0`, lädt das Projekt keine JSON-Konfiguration
+mehr. Stattdessen stammen die Ports aus `static_default_ports[]` in `src/main.c`
+(oder aus einer eigenen Anwendung). Die Web-API liefert weiterhin Statusdaten,
+antwortet bei Schreibzugriffen jedoch mit `403 Forbidden`. Gleiches gilt für den
+Control-Port: Kommandos wie `setportconfig` oder `setportenable` werden als
+"read-only" quittiert, während `showport` und `disconnect` verfügbar bleiben.
 
 ## HTTP API
 
@@ -135,21 +154,39 @@ the control port and keeps the non-volatile store in sync automatically.
 
 - `GET /api/health` – simple status endpoint.
 - `GET /api/ports` – list current UART/TCP bindings together with live session
-  counts and the resolved `pin_map` string.
+  counts and the assigned GPIO pins.
+- `GET /api/system` – aggregate runtime metrics (heap usage, uptime, active
+  session count) for dashboard views.
 - `POST /api/ports` – create a new listener/UART mapping.  Accepts the same
-  fields as the `serial` JSON array (including optional `pin_map`).
+  fields as the `serial` JSON array (`uart`, `tx_pin`, `rx_pin`, optional
+  `rts_pin`/`cts_pin`, plus baud/mode parameters).
 - `POST /api/ports/<tcp>` or `/api/ports/<tcp>/config` – update baud rate,
   framing, flow control, idle timeout, or pin assignments.  The payload matches
   the RFC2217 concepts (`baud`, `data_bits`, `parity`, `stop_bits`,
-  `flow_control`, `idle_timeout_ms`, `apply_active`, and optional `pin_map`).
+  `flow_control`, `idle_timeout_ms`, `apply_active`, and optional `tx_pin`,
+  `rx_pin`, `rts_pin`, `cts_pin`, or `uart`).
 - `POST /api/ports/<tcp>/mode` – toggle `raw`, `rawlp`, or `telnet` mode and
   enable/disable the listener.
 - `POST /api/ports/<tcp>/disconnect` – drop the currently active TCP session (if
   any) without touching the listener configuration.
+- `DELETE /api/ports/<tcp>` – unregister the listener/UART pair entirely.  Any
+  active clients are disconnected first; the change is persisted immediately.
+- `GET /api/wifi` – report STA/SoftAP status (connected SSID, IP, AP window).
+- `POST /api/wifi` – push new Wi-Fi credentials or toggle the provisioning
+  SoftAP (`{"ssid":"…", "password":"…", "softap_enabled":true/false}`).
+- `DELETE /api/wifi` – forget stored credentials and fall back to provisioning
+  SoftAP-only mode.
 
 Every successful HTTP mutation triggers a configuration snapshot, so the next
 boot will pick up the updated UART list directly from NVS without requiring a
 reflash.
+
+You can exercise the read-only parts of the API quickly via the host-side test
+suite:
+
+```bash
+SER2NET_ESP_IP=<device-ip> pytest tests/host/test_http_api.py
+```
 
 ## Logging
 

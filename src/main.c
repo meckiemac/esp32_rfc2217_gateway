@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,7 @@
 #include "json_config.h"
 #include "adapters.h"
 #include "config_store.h"
+#include "ser2net_opts.h"
 
 #include "net_manager.h"
 #include "web_server.h"
@@ -26,10 +28,34 @@ static const char *TAG = "ser2net_main";
 
 #include "wifi_config.h"
 
+#if !ENABLE_DYNAMIC_SESSIONS
+static const struct ser2net_esp32_serial_port_cfg static_default_ports[] = {
+    {
+        .port_id = 0,
+        .uart_num = UART_NUM_1,
+        .tx_pin = 17,
+        .rx_pin = 16,
+        .rts_pin = UART_PIN_NO_CHANGE,
+        .cts_pin = UART_PIN_NO_CHANGE,
+        .tcp_port = 4000,
+        .tcp_backlog = 4,
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .mode = SER2NET_PORT_MODE_TELNET,
+        .idle_timeout_ms = 0,
+        .enabled = true
+    }
+};
+#endif
+
 static const char config_json[] =
 #include "config.json"
 ;
 
+#if ENABLE_DYNAMIC_SESSIONS
 struct persist_context {
     uint16_t control_port;
     int control_backlog;
@@ -49,6 +75,7 @@ static void persist_runtime_snapshot(void *ctx)
         ESP_LOGW(TAG, "Failed to persist control configuration");
     }
 }
+#endif
 
 static bool rebuild_runtime_serial(struct ser2net_app_config *app_cfg,
                                    struct ser2net_esp32_serial_cfg *serial_cfg,
@@ -152,20 +179,45 @@ void app_main(void)
     struct ser2net_app_config app_cfg = {0};
     struct ser2net_esp32_network_cfg net_cfg = {0};
     struct ser2net_esp32_serial_cfg serial_cfg = {0};
-    struct ser2net_esp32_serial_port_cfg serial_ports[SER2NET_MAX_PORTS];
-    memset(serial_ports, 0, sizeof(serial_ports));
+    struct ser2net_esp32_serial_port_cfg *serial_ports = NULL;
+    struct ser2net_esp32_serial_port_cfg *default_ports = NULL;
+    struct ser2net_esp32_serial_port_cfg *persisted_ports = NULL;
+    const size_t port_capacity = SER2NET_MAX_PORTS;
 
+#if ENABLE_JSON_CONFIG
+    serial_ports = calloc(port_capacity, sizeof(*serial_ports));
+    if (!serial_ports) {
+        ESP_LOGE(TAG, "Failed to allocate serial port buffer");
+        return;
+    }
+
+    default_ports = calloc(port_capacity, sizeof(*default_ports));
+    if (!default_ports) {
+        ESP_LOGE(TAG, "Failed to allocate default port buffer");
+        goto cleanup;
+    }
+
+    persisted_ports = calloc(port_capacity, sizeof(*persisted_ports));
+    if (!persisted_ports) {
+        ESP_LOGE(TAG, "Failed to allocate persisted port buffer");
+        goto cleanup;
+    }
+#endif
+
+#if ENABLE_JSON_CONFIG
     ESP_LOGI(TAG, "Loading configuration (%zu bytes)", strlen(config_json));
     if (ser2net_load_config_json_esp32(config_json,
                                        &app_cfg,
                                        &net_cfg,
                                        &serial_cfg,
                                        serial_ports,
-                                       sizeof(serial_ports) / sizeof(serial_ports[0])) != pdPASS) {
+                                       port_capacity) != pdPASS) {
         const char *err = ser2net_json_last_error();
         ESP_LOGE(TAG, "Config load failed: %s", err ? err : "unknown");
-        return;
+        goto cleanup;
     }
+
+    serial_cfg.ports = serial_ports;
 
     uint16_t stored_control_port = 0;
     int stored_control_backlog = 0;
@@ -178,21 +230,19 @@ void app_main(void)
             app_cfg.runtime_cfg.control_ctx.backlog = stored_control_backlog;
     }
 
-    struct ser2net_esp32_serial_port_cfg default_ports[SER2NET_MAX_PORTS];
-    memcpy(default_ports, serial_ports, sizeof(default_ports));
+    memcpy(default_ports, serial_ports, port_capacity * sizeof(*default_ports));
 
     size_t stored_port_count = 0;
-    struct ser2net_esp32_serial_port_cfg persisted_ports[SER2NET_MAX_PORTS];
-    bool have_persisted_ports = config_store_load_ports(persisted_ports, SER2NET_MAX_PORTS, &stored_port_count);
+    bool have_persisted_ports = config_store_load_ports(persisted_ports, port_capacity, &stored_port_count);
     size_t default_port_count = serial_cfg.num_ports;
     if (have_persisted_ports) {
-        if (stored_port_count > SER2NET_MAX_PORTS)
-            stored_port_count = SER2NET_MAX_PORTS;
-        memcpy(serial_ports, persisted_ports, stored_port_count * sizeof(struct ser2net_esp32_serial_port_cfg));
+        if (stored_port_count > port_capacity)
+            stored_port_count = port_capacity;
+        memcpy(serial_ports, persisted_ports, stored_port_count * sizeof(*serial_ports));
         serial_cfg.num_ports = stored_port_count;
         if (!rebuild_runtime_serial(&app_cfg, &serial_cfg, &net_cfg)) {
             ESP_LOGE(TAG, "Failed to rebuild runtime from persisted ports, falling back to static config");
-            memcpy(serial_ports, default_ports, sizeof(default_ports));
+            memcpy(serial_ports, default_ports, port_capacity * sizeof(*default_ports));
             serial_cfg.num_ports = default_port_count;
             rebuild_runtime_serial(&app_cfg, &serial_cfg, &net_cfg);
         }
@@ -203,21 +253,62 @@ void app_main(void)
     app_cfg.runtime_cfg.control_ctx.ports = serial_cfg.ports;
     app_cfg.runtime_cfg.control_ctx.port_count = serial_cfg.num_ports;
 
+#if ENABLE_DYNAMIC_SESSIONS
     s_persist_ctx.control_port = app_cfg.runtime_cfg.control_ctx.tcp_port;
     s_persist_ctx.control_backlog = app_cfg.runtime_cfg.control_ctx.backlog;
     (void) config_store_save_control(s_persist_ctx.control_port, s_persist_ctx.control_backlog);
 
     app_cfg.runtime_cfg.config_changed_cb = persist_runtime_snapshot;
     app_cfg.runtime_cfg.config_changed_ctx = &s_persist_ctx;
+#endif
 
     if (ser2net_start(&app_cfg) != pdPASS) {
         ESP_LOGE(TAG, "ser2net_start() failed");
-        return;
+        goto cleanup;
     }
 
+#if ENABLE_DYNAMIC_SESSIONS
     persist_runtime_snapshot(&s_persist_ctx);
+#endif
+
+#else /* !ENABLE_JSON_CONFIG */
+    ser2net_runtime_config_init(&app_cfg.runtime_cfg);
+    ser2net_session_config_init(&app_cfg.session_cfg);
+
+    net_cfg.listen_port = 0;
+    net_cfg.backlog = 4;
+
+    serial_cfg.ports = static_default_ports;
+    serial_cfg.num_ports = sizeof(static_default_ports) / sizeof(static_default_ports[0]);
+    serial_cfg.rx_buffer_size = 512;
+    serial_cfg.tx_buffer_size = 512;
+
+    if (!rebuild_runtime_serial(&app_cfg, &serial_cfg, &net_cfg)) {
+        ESP_LOGE(TAG, "Failed to build static runtime configuration");
+        goto cleanup;
+    }
+
+#if ENABLE_CONTROL_PORT
+    app_cfg.runtime_cfg.control_enabled = true;
+    app_cfg.runtime_cfg.control_ctx.tcp_port = 4020;
+    app_cfg.runtime_cfg.control_ctx.backlog = 2;
+#else
+    app_cfg.runtime_cfg.control_enabled = false;
+#endif
+
+    if (ser2net_start(&app_cfg) != pdPASS) {
+        ESP_LOGE(TAG, "ser2net_start() failed");
+        goto cleanup;
+    }
+#endif /* ENABLE_JSON_CONFIG */
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+cleanup:
+    free(persisted_ports);
+    free(default_ports);
+    free(serial_ports);
+    return;
 }

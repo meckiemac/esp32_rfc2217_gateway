@@ -66,14 +66,26 @@ Auswirkungen auf die klassische Linux-Version entwickelt werden können.
 
 ## JSON-Beispiel (ESP32)
 
+### Build-Flags
+
+Die Datei `ser2net_opts.h` stellt Build-Zeit-Schalter zur Verfügung. Relevante
+Kombinationen:
+
+- `ENABLE_DYNAMIC_SESSIONS=0` – Ports werden ausschließlich zur Compile-Zeit
+  definiert, JSON-Parsing und REST/Control-Port Schreiboperationen sind
+  deaktiviert.
+- `ENABLE_CONTROL_PORT=0` – kein Telnet-Shell, Monitoring ist implizit aus.
+- `ENABLE_MONITORING=0` – Control-Port bleibt aktiv, Streams (`monitor`) sind
+  jedoch abgeschaltet.
+- `ENABLE_JSON_CONFIG` wird automatisch deaktiviert, sobald dynamische
+  Sessions ausgeschaltet sind.
+
 ```json
 {
-  "listen": { "port": 4000, "backlog": 2 },
   "sessions": { "max": 2, "stack_words": 4096 },
   "buffers": { "net": 512, "serial": 512 },
   "serial": [
     {
-      "port_id": 0,
       "uart": 1,
       "tx_pin": 17,
       "rx_pin": 16,
@@ -110,20 +122,29 @@ aktuellen MCU-Kommandos:
 
 - `help`, `version`, `quit`/`exit`
 - `showport [port]` zeigt die vollständige UART/TCP-Konfiguration und
-  aktuelle Session-Zahlen (Port kann TCP-Port, `port_id` oder UART-Nummer sein).
+  aktuelle Session-Zahlen (Port kann per TCP-Port oder UART-Nummer gewählt
+  werden; die internen `port_id`s dienen nur als Debug-Hinweis).
 - `showshortport [port]` liefert dieselben Informationen in einer
-  Ein-Zeilen-Darstellung; `status` ist ein Alias für `showport`.
+  Ein-Zeilen-Darstellung.
 - `monitor <tcp|term> <port>` streamt die jeweils eingehenden Daten
   (Richtung wählbar) unverändert/roh auf den Control-Port – identisch
   zum Linux-Original; `monitor stop` beendet die Überwachung.
 - `disconnect <port>` löst eine bestehende TCP-Verbindung (falls aktiv).
 - `setporttimeout <port> <sek>` passt die Leerlaufzeit an (0 = deaktiviert).
 - `setportconfig <port> <baud/flags>` ändert Baudrate, Daten-/Stoppbits,
-  Parität und Flow-Control (z. B. `setportconfig 4000 57600 8DATABITS 1STOPBIT NONE`).
+  Parität, Flow-Control sowie die Pinbelegung. Neben den klassischen Tokens
+  (`115200 8DATABITS NONE 1STOPBIT +RTSCTS`) werden Großbuchstaben-Varianten
+  wie `UART2 TX17 RX16 RTS18 CTS19` verstanden. Das Präfix `-` deaktiviert eine
+  Leitung (`-TX`, `-RX`, `-RTS`, `-CTS`). Existiert der angegebene TCP-Port
+  noch nicht, legt der Befehl (bei gesetzten `UARTn` plus mindestens einer
+  Richtung) automatisch eine neue Port-Zuordnung an. In Builds ohne
+  `ENABLE_DYNAMIC_SESSIONS` antwortet der Befehl mit einer Fehlermeldung.
 - `setportcontrol <port> <controls>` setzt DTR/RTS-Leitungen (`RTSHI`, `RTSLO`,
-  `DTRHI`, `DTRLO`).
+  `DTRHI`, `DTRLO`). Wird bei statischen Builds (`ENABLE_DYNAMIC_SESSIONS == 0`)
+  mit einer Fehlermeldung quittiert.
 - `setportenable <port> <off|raw|rawlp|telnet>` deaktiviert/aktiviert Ports und
-  schaltet den Sitzungsmodus um (OFF beendet aktive Verbindungen).
+  schaltet den Sitzungsmodus um (OFF beendet aktive Verbindungen). In der
+  statischen Konfiguration nur als Lesebefehl verfügbar.
 - `idle_timeout_ms` (optional) pro serial-Eintrag definiert die gewünschte
   Leerlaufzeit (0 = deaktiviert); Änderungen per Control-Port werden in die
   Laufzeit-Defaults übernommen.

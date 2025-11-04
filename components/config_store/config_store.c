@@ -1,4 +1,5 @@
 #include "config_store.h"
+#include "adapters.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -15,6 +16,9 @@ static const char *TAG = "config_store";
 #define KEY_PORTS_BLOB       "ports_blob"
 #define KEY_CONTROL_PORT     "ctrl_port"
 #define KEY_CONTROL_BACKLOG  "ctrl_backlog"
+#define KEY_WIFI_SSID        "wifi_ssid"
+#define KEY_WIFI_PASSWORD    "wifi_pass"
+#define KEY_WIFI_AP_FORCE_OFF "wifi_ap_force"
 #define PORTS_STORE_VERSION  1
 
 static inline bool is_success(esp_err_t err)
@@ -190,4 +194,111 @@ void config_store_clear_ports(void)
     nvs_erase_key(handle, KEY_PORTS_BLOB);
     nvs_commit(handle);
     nvs_close(handle);
+}
+
+bool config_store_load_wifi_credentials(char *ssid,
+                                        size_t ssid_len,
+                                        char *password,
+                                        size_t password_len)
+{
+    if (!ssid || !password || ssid_len == 0 || password_len == 0)
+        return false;
+
+    nvs_handle_t handle;
+    if (nvs_open(STORE_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+        return false;
+
+    size_t len = 0;
+    esp_err_t err = nvs_get_str(handle, KEY_WIFI_SSID, NULL, &len);
+    if (err != ESP_OK || len == 0 || len > ssid_len) {
+        nvs_close(handle);
+        return false;
+    }
+    err = nvs_get_str(handle, KEY_WIFI_SSID, ssid, &len);
+    if (err != ESP_OK) {
+        nvs_close(handle);
+        return false;
+    }
+
+    len = 0;
+    err = nvs_get_str(handle, KEY_WIFI_PASSWORD, NULL, &len);
+    if (err != ESP_OK || len > password_len) {
+        nvs_close(handle);
+        return false;
+    }
+    err = nvs_get_str(handle, KEY_WIFI_PASSWORD, password, &len);
+    nvs_close(handle);
+    if (err != ESP_OK)
+        return false;
+
+    return true;
+}
+
+bool config_store_save_wifi_credentials(const char *ssid, const char *password)
+{
+    if (!ssid)
+        return false;
+
+    if (!password)
+        password = "";
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(STORE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK)
+        return false;
+
+    err = nvs_set_str(handle, KEY_WIFI_SSID, ssid);
+    if (err == ESP_OK)
+        err = nvs_set_str(handle, KEY_WIFI_PASSWORD, password);
+    if (err == ESP_OK)
+        err = nvs_commit(handle);
+
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+void config_store_clear_wifi_credentials(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(STORE_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+        return;
+
+    nvs_erase_key(handle, KEY_WIFI_SSID);
+    nvs_erase_key(handle, KEY_WIFI_PASSWORD);
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+bool config_store_load_softap_forced_disable(bool *forced_disable)
+{
+    if (!forced_disable)
+        return false;
+
+    nvs_handle_t handle;
+    if (nvs_open(STORE_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+        return false;
+
+    uint8_t value = 0;
+    esp_err_t err = nvs_get_u8(handle, KEY_WIFI_AP_FORCE_OFF, &value);
+    nvs_close(handle);
+    if (err != ESP_OK)
+        return false;
+
+    *forced_disable = value != 0;
+    return true;
+}
+
+bool config_store_save_softap_forced_disable(bool forced_disable)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(STORE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK)
+        return false;
+
+    err = nvs_set_u8(handle, KEY_WIFI_AP_FORCE_OFF, forced_disable ? 1 : 0);
+    if (err == ESP_OK)
+        err = nvs_commit(handle);
+
+    nvs_close(handle);
+    return err == ESP_OK;
 }

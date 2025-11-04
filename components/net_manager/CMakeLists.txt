@@ -8,6 +8,9 @@ set(netif_inc "${netif_dir}/include")
 
 message(STATUS "net_manager event_inc=${event_inc}")
 
+idf_build_get_property(project_dir PROJECT_DIR)
+
 idf_component_register(SRCS "net_manager.c"
-                      INCLUDE_DIRS "include" "${event_inc}" "${wifi_inc}" "${netif_inc}"
-                      REQUIRES esp_event esp_wifi esp_netif lwip)
+                      INCLUDE_DIRS "include" "${event_inc}" "${wifi_inc}" "${netif_inc}" "${project_dir}/components/config_store/include"
+                      REQUIRES esp_event esp_wifi esp_netif lwip
+                      PRIV_REQUIRES config_store)
